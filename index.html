@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+  />
+  <title>Firebase DM Chat (Users, Friends, Images/GIFs)</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap"
+    rel="stylesheet"
+  />
+</head>
+<body>
+  <div id="app">
+
+    <!-- Auth Views -->
+    <section id="auth-view" class="view">
+      <div class="auth-card">
+        <div class="tabs">
+          <button class="tab active" data-tab="login">Login</button>
+          <button class="tab" data-tab="signup">Sign Up</button>
+        </div>
+
+        <!-- Login -->
+        <form id="login-form" class="panel active">
+          <h2>Login</h2>
+          <p class="help">
+            Use <b>username + password</b> <i>or</i> <b>email + password</b>.
+          </p>
+          <label>Username or Email</label>
+          <input id="login-identifier" type="text" placeholder="davian or davian@example.com" required />
+          <label>Password</label>
+          <input id="login-password" type="password" placeholder="Your password" required />
+          <button type="submit" class="primary">Login</button>
+          <div id="login-error" class="error"></div>
+        </form>
+
+        <!-- Sign Up -->
+        <form id="signup-form" class="panel">
+          <h2>Create Account</h2>
+          <label>Username</label>
+          <input id="signup-username" type="text" minlength="3" maxlength="20" placeholder="e.g. davian" required />
+          <label>Email</label>
+          <input id="signup-email" type="email" placeholder="you@example.com" required />
+          <label>Password</label>
+          <input id="signup-password" type="password" minlength="6" placeholder="At least 6 characters" required />
+          <button type="submit" class="primary">Create Account</button>
+          <div id="signup-error" class="error"></div>
+        </form>
+      </div>
+    </section>
+
+    <!-- App View -->
+    <section id="app-view" class="view hidden">
+      <header class="app-header">
+        <div class="me">
+          <div class="dot" id="me-dot"></div>
+          <div>
+            <div id="me-username" class="bold">—</div>
+            <div id="me-email" class="muted">—</div>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="logout-btn" class="ghost">Logout</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <!-- Left: People & Contacts -->
+        <aside class="sidebar">
+          <div class="card">
+            <h3>Find Users</h3>
+            <form id="search-form" class="inline">
+              <input id="search-username" type="text" placeholder="Search exact username…" />
+              <button class="small" type="submit">Search</button>
+            </form>
+            <div id="search-results" class="list"></div>
+          </div>
+
+          <div class="card">
+            <h3>My Friends</h3>
+            <div id="contacts" class="list"></div>
+          </div>
+        </aside>
+
+        <!-- Center: Chat -->
+        <section class="chat">
+          <div id="chat-header" class="chat-header">
+            <div class="chat-title">Select a friend to start chatting</div>
+            <div id="chat-presence" class="chat-presence"></div>
+          </div>
+
+          <div id="messages" class="messages">
+            <!-- messages will render here -->
+          </div>
+
+          <form id="message-form" class="message-form disabled">
+            <input id="message-input" type="text" placeholder="Type a message…" autocomplete="off" />
+            <input id="file-input" type="file" accept="image/*" hidden />
+            <button id="attach-btn" type="button" title="Attach image or GIF">📎</button>
+            <button id="send-btn" class="primary" type="submit">Send</button>
+          </form>
+          <div id="upload-progress" class="muted tiny"></div>
+        </section>
+
+        <!-- Right: Online Now -->
+        <aside class="sidebar">
+          <div class="card">
+            <h3>Online Now</h3>
+            <div id="online-list" class="list"></div>
+          </div>
+        </aside>
+      </main>
+    </section>
+
+  </div>
+
+  <!-- Config (fill with your Firebase project info) -->
+  <script type="module" src="./config.js"></script>
+
+  <!-- App -->
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

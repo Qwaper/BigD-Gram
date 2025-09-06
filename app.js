@@ -1,9 +1,10 @@
-// app.js
+// app.js (Realtime Database version)
 import { firebaseConfig } from "./config.js";
 
 import {
   initializeApp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+
 import {
   getAuth,
   createUserWithEmailAndPassword,
@@ -14,29 +15,18 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 import {
-  // CHANGED: use initializeFirestore instead of getFirestore
-  initializeFirestore,
-  // setLogLevel is handy if you want more logs while debugging transports:
-  // setLogLevel,
-  doc,
-  getDoc,
-  setDoc,
-  updateDoc,
-  collection,
-  onSnapshot,
-  addDoc,
-  query,
-  orderBy,
-  serverTimestamp
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-
-import {
   getDatabase,
-  ref as rtdbRef,
+  ref as dbRef,
+  child,
+  get,
+  set,
+  update,
   onValue,
   onDisconnect,
-  set as rtdbSet,
-  serverTimestamp as rtdbServerTimestamp
+  push,
+  query,
+  orderByChild,
+  limitToLast
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 import {
@@ -50,29 +40,6 @@ import {
    Firebase init
 ---------------------------- */
 const app = initializeApp(firebaseConfig);
-
-// If you need verbose logs while testing transports, uncomment:
-// setLogLevel('debug');
-
-/**
- * IMPORTANT TRANSPORT FIX:
- * Some networks/proxies/extensions break the default WebChannel stream
- * (you'll see 400s on .../Firestore/Listen and "client is offline").
- *
- * The settings below switch to more robust transports automatically:
- * - useFetchStreams: true → uses the modern fetch streaming transport
- * - experimentalAutoDetectLongPolling: true → falls back when streaming is blocked
- *
- * If your environment STILL blocks streaming, try forcing long polling:
- *   initializeFirestore(app, { experimentalForceLongPolling: true });
- * (Do not use force + fetchStreams together.)
- */
-const db = initializeFirestore(app, {
-  useFetchStreams: true,
-  experimentalAutoDetectLongPolling: true,
-  // experimentalForceLongPolling: true, // <— last-resort fallback; enable ONLY if needed
-});
-
 const auth = getAuth(app);
 const rtdb = getDatabase(app);
 const storage = getStorage(app);
@@ -130,12 +97,15 @@ const uploadProgress = $("#upload-progress");
    State
 ---------------------------- */
 let currentUser = null;
-let usersMap = new Map();               // uid -> { username, email, ... }
-let onlineStatus = new Map();           // uid -> 'online'|'offline'
-let contacts = new Map();               // otherUid -> { conversationId, username, ... }
+let usersMap = new Map();          // uid -> user profile
+let onlineStatus = new Map();      // uid -> 'online'|'offline'
+let contacts = new Map();          // otherUid -> { conversationId, username }
 let activeConversationId = null;
 let activePeerUid = null;
 let messagesUnsub = null;
+let usersUnsub = null;
+let statusUnsub = null;
+let contactsUnsub = null;
 
 /* ---------------------------
    Tabs (login/signup)
@@ -163,40 +133,38 @@ signupForm.addEventListener("submit", async (e) => {
   const email = signupEmail.value.trim();
   const password = signupPassword.value;
 
-  const username = rawUsername.toLowerCase();
-  if (!/^[a-z0-9_\.]{3,20}$/.test(username)) {
+  const usernameLower = rawUsername.toLowerCase();
+  if (!/^[a-z0-9_\.]{3,20}$/.test(usernameLower)) {
     signupError.textContent = "Username must be 3–20 chars: a-z 0-9 _ .";
     return;
   }
 
   try {
-    // (1) Ensure username isn't taken
-    const unameRef = doc(db, "usernames", username);
-    const nameSnap = await getDoc(unameRef);
-    if (nameSnap.exists()) {
+    // (1) ensure username not taken
+    const unameSnap = await get(dbRef(rtdb, `usernames/${usernameLower}`));
+    if (unameSnap.exists()) {
       signupError.textContent = "That username is already taken.";
       return;
     }
 
-    // (2) Create auth user
+    // (2) create auth user
     const cred = await createUserWithEmailAndPassword(auth, email, password);
     const uid = cred.user.uid;
     await updateProfile(cred.user, { displayName: rawUsername });
 
-    // (3) Create user profile doc
-    const userRef = doc(db, "users", uid);
-    await setDoc(userRef, {
-      uid,
-      username: rawUsername,
-      usernameLower: username,
-      email,
-      createdAt: serverTimestamp()
-    });
+    // (3) create user profile and claim username (RTDB)
+    await Promise.all([
+      set(dbRef(rtdb, `users/${uid}`), {
+        uid,
+        username: rawUsername,
+        usernameLower,
+        email,
+        createdAt: Date.now()
+      }),
+      set(dbRef(rtdb, `usernames/${usernameLower}`), { uid })
+    ]);
 
-    // (4) Claim the username
-    await setDoc(unameRef, { uid }, { merge: false });
-
-    // Done — state will switch via onAuthStateChanged
+    // onAuthStateChanged will continue
   } catch (err) {
     console.error(err);
     signupError.textContent = err.message || "Sign-up failed.";
@@ -216,34 +184,26 @@ loginForm.addEventListener("submit", async (e) => {
   try {
     let emailToUse = identifier;
 
-    // If "identifier" doesn't look like an email, treat as username
+    // If it's a username (no @), map -> uid -> email
     if (!identifier.includes("@")) {
-      const unameRef = doc(db, "usernames", identifier.toLowerCase());
-      const unameSnap = await getDoc(unameRef);
+      const unameSnap = await get(dbRef(rtdb, `usernames/${identifier.toLowerCase()}`));
       if (!unameSnap.exists()) {
         loginError.textContent = "That username does not exist.";
         return;
       }
-      const { uid } = unameSnap.data();
-      const userSnap = await getDoc(doc(db, "users", uid));
+      const { uid } = unameSnap.val();
+      const userSnap = await get(dbRef(rtdb, `users/${uid}`));
       if (!userSnap.exists()) {
         loginError.textContent = "User profile missing.";
         return;
       }
-      emailToUse = userSnap.data().email;
+      emailToUse = userSnap.val().email;
     }
 
     await signInWithEmailAndPassword(auth, emailToUse, password);
-    // onAuthStateChanged will take it from here
   } catch (err) {
     console.error(err);
-    // If transports are blocked you'll often see "client is offline".
-    if (/offline/i.test(String(err?.message))) {
-      loginError.textContent =
-        "Network/extension is blocking Firestore streaming. Reload after disabling blockers, or try another network.";
-    } else {
-      loginError.textContent = "Login failed: " + (err.message || "");
-    }
+    loginError.textContent = "Login failed: " + (err.message || "");
   }
 });
 
@@ -258,7 +218,7 @@ onAuthStateChanged(auth, async (user) => {
     await postLoginInit(user);
   } else {
     // cleanup
-    tearDownChat();
+    tearDownListeners();
     contacts.clear();
     activeConversationId = null; activePeerUid = null;
     usersMap.clear(); onlineStatus.clear();
@@ -274,20 +234,19 @@ logoutBtn.addEventListener("click", () => signOut(auth));
    Presence (Realtime Database)
 ---------------------------- */
 function setupPresence(uid) {
-  // Set online/offline in RTDB
-  const statusRef = rtdbRef(rtdb, `/status/${uid}`);
-  const connectedRef = rtdbRef(rtdb, ".info/connected");
+  const statusRef = dbRef(rtdb, `/status/${uid}`);
+  const ConnRef = dbRef(rtdb, ".info/connected");
 
-  onValue(connectedRef, (snap) => {
+  onValue(ConnRef, (snap) => {
     if (snap.val() === false) return;
 
     onDisconnect(statusRef).set({
       state: "offline",
-      last_changed: rtdbServerTimestamp()
+      last_changed: Date.now()
     }).then(() => {
-      rtdbSet(statusRef, {
+      set(statusRef, {
         state: "online",
-        last_changed: rtdbServerTimestamp()
+        last_changed: Date.now()
       });
     });
   });
@@ -296,34 +255,29 @@ function setupPresence(uid) {
 /* ---------------------------
    Post-login init
 ---------------------------- */
-let usersUnsub = null;
-let statusUnsub = null;
-let contactsUnsub = null;
-
 async function postLoginInit(user) {
   // header
   meUsername.textContent = user.displayName || "—";
   meEmail.textContent = user.email || "";
-  meDot.style.background = "#22c55e"; // green
+  meDot.style.background = "#22c55e";
 
   // presence
   setupPresence(user.uid);
 
-  // live map of users (uid -> profile)
+  // live map of users
   if (usersUnsub) usersUnsub();
-  usersUnsub = onSnapshot(collection(db, "users"), (snap) => {
+  usersUnsub = onValue(dbRef(rtdb, "users"), (snap) => {
     usersMap.clear();
-    snap.forEach((d) => usersMap.set(d.id, d.data()));
+    snap.forEach((childSnap) => {
+      usersMap.set(childSnap.key, childSnap.val());
+    });
     renderContactList();
     renderOnline();
-  }, (err) => {
-    console.error("users onSnapshot error", err);
   });
 
-  // online status map from RTDB
-  const statusRef = rtdbRef(rtdb, "/status");
+  // online status map
   if (statusUnsub) statusUnsub();
-  statusUnsub = onValue(statusRef, (snap) => {
+  statusUnsub = onValue(dbRef(rtdb, "status"), (snap) => {
     onlineStatus.clear();
     const val = snap.val() || {};
     Object.keys(val).forEach((uid) => {
@@ -335,12 +289,13 @@ async function postLoginInit(user) {
 
   // my contacts
   if (contactsUnsub) contactsUnsub();
-  contactsUnsub = onSnapshot(collection(db, "users", user.uid, "contacts"), (snap) => {
+  contactsUnsub = onValue(dbRef(rtdb, `contacts/${user.uid}`), (snap) => {
     contacts.clear();
-    snap.forEach((d) => contacts.set(d.id, d.data()));
+    const val = snap.val() || {};
+    Object.keys(val).forEach((otherUid) => {
+      contacts.set(otherUid, val[otherUid]);
+    });
     renderContactList();
-  }, (err) => {
-    console.error("contacts onSnapshot error", err);
   });
 }
 
@@ -353,50 +308,42 @@ searchForm.addEventListener("submit", async (e) => {
   searchResults.innerHTML = "";
   if (!name) return;
 
-  try {
-    const unameRef = doc(db, "usernames", name);
-    const nameSnap = await getDoc(unameRef);
-    if (!nameSnap.exists()) {
-      searchResults.innerHTML = `<div class="row"><div class="grow">No user found.</div></div>`;
-      return;
-    }
-    const { uid } = nameSnap.data();
-    if (uid === currentUser?.uid) {
-      searchResults.innerHTML = `<div class="row"><div class="grow">That’s you 😄</div></div>`;
-      return;
-    }
-    const profile = usersMap.get(uid);
-    const isFriend = contacts.has(uid);
-
-    const row = document.createElement("div");
-    row.className = "row";
-    row.innerHTML = `
-      <div class="dot" style="background:${onlineStatus.get(uid)==='online' ? '#22c55e' : '#9ca3af'}"></div>
-      <div class="grow">
-        <div class="title">@${esc(profile?.username || name)}</div>
-        <div class="sub">${esc(profile?.email || "")}</div>
-      </div>
-      ${isFriend
-        ? `<span class="pill">Friend</span><button class="small" data-msg="${uid}">Message</button>`
-        : `<button class="small" data-add="${uid}">Add Friend</button>`}
-    `;
-    searchResults.appendChild(row);
-
-    row.addEventListener("click", async (ev) => {
-      const addUid = ev.target?.dataset?.add;
-      const msgUid = ev.target?.dataset?.msg;
-      if (addUid) {
-        await addFriend(addUid);
-      }
-      if (msgUid) {
-        const cId = await ensureConversation(currentUser.uid, msgUid);
-        openConversation(cId, msgUid);
-      }
-    });
-  } catch (err) {
-    console.error(err);
-    searchResults.innerHTML = `<div class="row"><div class="grow">Search failed. If you’re on a restricted network, try a different network or disable ad-block.</div></div>`;
+  const unameSnap = await get(dbRef(rtdb, `usernames/${name}`));
+  if (!unameSnap.exists()) {
+    searchResults.innerHTML = `<div class="row"><div class="grow">No user found.</div></div>`;
+    return;
   }
+  const { uid } = unameSnap.val();
+  if (uid === currentUser.uid) {
+    searchResults.innerHTML = `<div class="row"><div class="grow">That’s you 😄</div></div>`;
+    return;
+  }
+  const profile = (await get(dbRef(rtdb, `users/${uid}`))).val();
+  const isFriend = contacts.has(uid);
+
+  const row = document.createElement("div");
+  row.className = "row";
+  row.innerHTML = `
+    <div class="dot" style="background:${onlineStatus.get(uid)==='online' ? '#22c55e' : '#9ca3af'}"></div>
+    <div class="grow">
+      <div class="title">@${esc(profile?.username || name)}</div>
+      <div class="sub">${esc(profile?.email || "")}</div>
+    </div>
+    ${isFriend
+      ? `<span class="pill">Friend</span><button class="small" data-msg="${uid}">Message</button>`
+      : `<button class="small" data-add="${uid}">Add Friend</button>`}
+  `;
+  searchResults.appendChild(row);
+
+  row.addEventListener("click", async (ev) => {
+    const addUid = ev.target?.dataset?.add;
+    const msgUid = ev.target?.dataset?.msg;
+    if (addUid) await addFriend(addUid);
+    if (msgUid) {
+      const cId = await ensureConversation(currentUser.uid, msgUid);
+      openConversation(cId, msgUid);
+    }
+  });
 });
 
 /* ---------------------------
@@ -478,9 +425,7 @@ function renderOnline() {
     row.addEventListener("click", async (ev) => {
       const addUid = ev.target?.dataset?.add;
       const msgUid = ev.target?.dataset?.msg;
-      if (addUid) {
-        await addFriend(addUid);
-      }
+      if (addUid) await addFriend(addUid);
       if (msgUid) {
         const cId = await ensureConversation(currentUser.uid, msgUid);
         openConversation(cId, msgUid);
@@ -500,34 +445,27 @@ async function addFriend(otherUid) {
   if (!other) return;
 
   const conversationId = conversationIdFor(myUid, otherUid);
-  const convRef = doc(db, "conversations", conversationId);
-  const convSnap = await getDoc(convRef);
-  if (!convSnap.exists()) {
-    await setDoc(convRef, {
-      id: conversationId,
-      participants: [myUid, otherUid],
-      createdAt: serverTimestamp(),
-      lastMessageAt: serverTimestamp()
-    });
-  }
+  // ensure conversation exists
+  await ensureConversation(myUid, otherUid);
 
   // create both contacts
+  const myContactRef = dbRef(rtdb, `contacts/${myUid}/${otherUid}`);
+  const theirContactRef = dbRef(rtdb, `contacts/${otherUid}/${myUid}`);
+
   await Promise.all([
-    setDoc(doc(db, "users", myUid, "contacts", otherUid), {
+    set(myContactRef, {
       userId: otherUid,
-      username: other.username,
+      username: other.username || "",
       conversationId,
-      createdAt: serverTimestamp()
-    }, { merge: true }),
-    setDoc(doc(db, "users", otherUid, "contacts", myUid), {
+      createdAt: Date.now()
+    }),
+    set(theirContactRef, {
       userId: myUid,
       username: currentUser.displayName || "",
       conversationId,
-      createdAt: serverTimestamp()
-    }, { merge: true })
+      createdAt: Date.now()
+    })
   ]);
-
-  // refresh list will happen via snapshot
 }
 
 function conversationIdFor(a, b) {
@@ -536,14 +474,13 @@ function conversationIdFor(a, b) {
 
 async function ensureConversation(a, b) {
   const id = conversationIdFor(a, b);
-  const ref = doc(db, "conversations", id);
-  const snap = await getDoc(ref);
+  const convRef = dbRef(rtdb, `conversations/${id}`);
+  const snap = await get(convRef);
   if (!snap.exists()) {
-    await setDoc(ref, {
-      id,
-      participants: [a, b],
-      createdAt: serverTimestamp(),
-      lastMessageAt: serverTimestamp()
+    await set(convRef, {
+      participants: { [a]: true, [b]: true },
+      createdAt: Date.now(),
+      lastMessageAt: Date.now()
     });
   }
   return id;
@@ -566,18 +503,22 @@ async function openConversation(conversationId, peerUid) {
   messageInput.focus();
 
   if (messagesUnsub) messagesUnsub();
-  const q = query(
-    collection(db, "conversations", conversationId, "messages"),
-    orderBy("createdAt", "asc")
+
+  // RTDB ordered feed
+  const msgQuery = query(
+    dbRef(rtdb, `messages/${conversationId}`),
+    orderByChild("createdAt"),
+    limitToLast(200)
   );
-  messagesUnsub = onSnapshot(q, (snap) => {
+
+  messagesUnsub = onValue(msgQuery, (snap) => {
     messagesEl.innerHTML = "";
-    snap.forEach((d) => {
-      renderMessage(d.id, d.data());
+    snap.forEach((childSnap) => {
+      const id = childSnap.key;
+      const data = childSnap.val();
+      renderMessage(id, data);
     });
     messagesEl.scrollTop = messagesEl.scrollHeight;
-  }, (err) => {
-    console.error("messages onSnapshot error", err);
   });
 }
 
@@ -625,29 +566,26 @@ messageForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = messageInput.value.trim();
   if (!activeConversationId) return;
+  if (!text && !fileInput.files.length) return;
 
-  if (!text && !fileInput.files.length) {
-    return;
-  }
-
-  // If there's a file queued, upload first, then send message
   let imageUrl = null;
   if (fileInput.files.length) {
     imageUrl = await uploadImage(fileInput.files[0]);
-    fileInput.value = ""; // reset
+    fileInput.value = "";
   }
 
-  await addDoc(collection(db, "conversations", activeConversationId, "messages"), {
+  const msgRef = push(dbRef(rtdb, `messages/${activeConversationId}`));
+  await set(msgRef, {
     senderId: currentUser.uid,
     text: text || "",
     type: imageUrl ? "image" : "text",
     imageUrl: imageUrl || null,
-    createdAt: serverTimestamp()
+    createdAt: Date.now()
   });
 
-  // bump conversation
-  await updateDoc(doc(db, "conversations", activeConversationId), {
-    lastMessageAt: serverTimestamp()
+  // bump conversation lastMessageAt
+  await update(dbRef(rtdb, `conversations/${activeConversationId}`), {
+    lastMessageAt: Date.now()
   });
 
   messageInput.value = "";
@@ -673,9 +611,9 @@ async function uploadImage(file) {
 }
 
 /* ---------------------------
-   Clean up chat listener on logout
+   Cleanup
 ---------------------------- */
-function tearDownChat() {
+function tearDownListeners() {
   if (messagesUnsub) messagesUnsub();
   if (usersUnsub) usersUnsub();
   if (statusUnsub) statusUnsub();

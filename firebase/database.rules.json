@@ -1,7 +1,46 @@
 {
   "rules": {
     ".read": "auth != null",
-    ".write": "false",
+    ".write": false,
+
+    "usernames": {
+      "$uname": {
+        ".read": true,
+        ".write": "auth != null && !data.exists()"
+      }
+    },
+
+    "users": {
+      "$uid": {
+        ".read": "auth != null",
+        ".write": "$uid === auth.uid"
+      }
+    },
+
+    "contacts": {
+      "$uid": {
+        "$other": {
+          ".read": "$uid === auth.uid",
+          ".write": "$uid === auth.uid"
+        }
+      }
+    },
+
+    "conversations": {
+      "$convId": {
+        ".read": "auth != null && root.child('conversations').child($convId).child('participants').child(auth.uid).exists()",
+        ".write": "auth != null && ( (!data.exists() && newData.child('participants').child(auth.uid).exists()) || data.child('participants').child(auth.uid).exists() )"
+      }
+    },
+
+    "messages": {
+      "$convId": {
+        ".read": "auth != null && root.child('conversations').child($convId).child('participants').child(auth.uid).exists()",
+        "$msgId": {
+          ".write": "auth != null && newData.child('senderId').val() === auth.uid && root.child('conversations').child($convId).child('participants').child(auth.uid).exists()"
+        }
+      }
+    },
 
     "status": {
       "$uid": {

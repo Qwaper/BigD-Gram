@@ -14,7 +14,10 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 import {
-  getFirestore,
+  // CHANGED: use initializeFirestore instead of getFirestore
+  initializeFirestore,
+  // setLogLevel is handy if you want more logs while debugging transports:
+  // setLogLevel,
   doc,
   getDoc,
   setDoc,
@@ -23,7 +26,6 @@ import {
   onSnapshot,
   addDoc,
   query,
-  where,
   orderBy,
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -48,8 +50,30 @@ import {
    Firebase init
 ---------------------------- */
 const app = initializeApp(firebaseConfig);
+
+// If you need verbose logs while testing transports, uncomment:
+// setLogLevel('debug');
+
+/**
+ * IMPORTANT TRANSPORT FIX:
+ * Some networks/proxies/extensions break the default WebChannel stream
+ * (you'll see 400s on .../Firestore/Listen and "client is offline").
+ *
+ * The settings below switch to more robust transports automatically:
+ * - useFetchStreams: true → uses the modern fetch streaming transport
+ * - experimentalAutoDetectLongPolling: true → falls back when streaming is blocked
+ *
+ * If your environment STILL blocks streaming, try forcing long polling:
+ *   initializeFirestore(app, { experimentalForceLongPolling: true });
+ * (Do not use force + fetchStreams together.)
+ */
+const db = initializeFirestore(app, {
+  useFetchStreams: true,
+  experimentalAutoDetectLongPolling: true,
+  // experimentalForceLongPolling: true, // <— last-resort fallback; enable ONLY if needed
+});
+
 const auth = getAuth(app);
-const db = getFirestore(app);
 const rtdb = getDatabase(app);
 const storage = getStorage(app);
 
@@ -169,7 +193,7 @@ signupForm.addEventListener("submit", async (e) => {
       createdAt: serverTimestamp()
     });
 
-    // (4) Claim the username (simple uniqueness map)
+    // (4) Claim the username
     await setDoc(unameRef, { uid }, { merge: false });
 
     // Done — state will switch via onAuthStateChanged
@@ -213,7 +237,13 @@ loginForm.addEventListener("submit", async (e) => {
     // onAuthStateChanged will take it from here
   } catch (err) {
     console.error(err);
-    loginError.textContent = "Login failed: " + (err.message || "");
+    // If transports are blocked you'll often see "client is offline".
+    if (/offline/i.test(String(err?.message))) {
+      loginError.textContent =
+        "Network/extension is blocking Firestore streaming. Reload after disabling blockers, or try another network.";
+    } else {
+      loginError.textContent = "Login failed: " + (err.message || "");
+    }
   }
 });
 
@@ -286,6 +316,8 @@ async function postLoginInit(user) {
     snap.forEach((d) => usersMap.set(d.id, d.data()));
     renderContactList();
     renderOnline();
+  }, (err) => {
+    console.error("users onSnapshot error", err);
   });
 
   // online status map from RTDB
@@ -307,6 +339,8 @@ async function postLoginInit(user) {
     contacts.clear();
     snap.forEach((d) => contacts.set(d.id, d.data()));
     renderContactList();
+  }, (err) => {
+    console.error("contacts onSnapshot error", err);
   });
 }
 
@@ -319,46 +353,50 @@ searchForm.addEventListener("submit", async (e) => {
   searchResults.innerHTML = "";
   if (!name) return;
 
-  // use usernames mapping to resolve uid
-  const unameRef = doc(db, "usernames", name);
-  const nameSnap = await getDoc(unameRef);
-  if (!nameSnap.exists()) {
-    searchResults.innerHTML = `<div class="row"><div class="grow">No user found.</div></div>`;
-    return;
-  }
-  const { uid } = nameSnap.data();
-  if (uid === currentUser.uid) {
-    searchResults.innerHTML = `<div class="row"><div class="grow">That’s you 😄</div></div>`;
-    return;
-  }
-  const profile = usersMap.get(uid);
-  const isFriend = contacts.has(uid);
-
-  const row = document.createElement("div");
-  row.className = "row";
-  row.innerHTML = `
-    <div class="dot" style="background:${onlineStatus.get(uid)==='online' ? '#22c55e' : '#9ca3af'}"></div>
-    <div class="grow">
-      <div class="title">@${esc(profile?.username || name)}</div>
-      <div class="sub">${esc(profile?.email || "")}</div>
-    </div>
-    ${isFriend
-      ? `<span class="pill">Friend</span><button class="small" data-msg="${uid}">Message</button>`
-      : `<button class="small" data-add="${uid}">Add Friend</button>`}
-  `;
-  searchResults.appendChild(row);
-
-  row.addEventListener("click", async (ev) => {
-    const addUid = ev.target?.dataset?.add;
-    const msgUid = ev.target?.dataset?.msg;
-    if (addUid) {
-      await addFriend(addUid);
+  try {
+    const unameRef = doc(db, "usernames", name);
+    const nameSnap = await getDoc(unameRef);
+    if (!nameSnap.exists()) {
+      searchResults.innerHTML = `<div class="row"><div class="grow">No user found.</div></div>`;
+      return;
     }
-    if (msgUid) {
-      const cId = await ensureConversation(currentUser.uid, msgUid);
-      openConversation(cId, msgUid);
+    const { uid } = nameSnap.data();
+    if (uid === currentUser?.uid) {
+      searchResults.innerHTML = `<div class="row"><div class="grow">That’s you 😄</div></div>`;
+      return;
     }
-  });
+    const profile = usersMap.get(uid);
+    const isFriend = contacts.has(uid);
+
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `
+      <div class="dot" style="background:${onlineStatus.get(uid)==='online' ? '#22c55e' : '#9ca3af'}"></div>
+      <div class="grow">
+        <div class="title">@${esc(profile?.username || name)}</div>
+        <div class="sub">${esc(profile?.email || "")}</div>
+      </div>
+      ${isFriend
+        ? `<span class="pill">Friend</span><button class="small" data-msg="${uid}">Message</button>`
+        : `<button class="small" data-add="${uid}">Add Friend</button>`}
+    `;
+    searchResults.appendChild(row);
+
+    row.addEventListener("click", async (ev) => {
+      const addUid = ev.target?.dataset?.add;
+      const msgUid = ev.target?.dataset?.msg;
+      if (addUid) {
+        await addFriend(addUid);
+      }
+      if (msgUid) {
+        const cId = await ensureConversation(currentUser.uid, msgUid);
+        openConversation(cId, msgUid);
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    searchResults.innerHTML = `<div class="row"><div class="grow">Search failed. If you’re on a restricted network, try a different network or disable ad-block.</div></div>`;
+  }
 });
 
 /* ---------------------------
@@ -537,8 +575,9 @@ async function openConversation(conversationId, peerUid) {
     snap.forEach((d) => {
       renderMessage(d.id, d.data());
     });
-    // scroll to bottom
     messagesEl.scrollTop = messagesEl.scrollHeight;
+  }, (err) => {
+    console.error("messages onSnapshot error", err);
   });
 }
 
@@ -622,7 +661,6 @@ async function uploadImage(file) {
     alert("Only images are allowed.");
     return null;
   }
-  // GIFs okay — they are image/gif
   const path = `uploads/${currentUser.uid}/${Date.now()}_${file.name}`;
   const ref = storageRef(storage, path);
 
